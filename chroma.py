@@ -15,12 +15,14 @@
 # 7. Press 'q' or the Escape key to exit.
 #####################################################################
 
+# Import necessary libraries
 import cv2
 import time
 import numpy as np
 
-video_file = "greenscreen-demo.mp4"
-# video_file = "greenscreen-asteroid.mp4"
+# Define video and background files (choose one of the video files)
+# video_file = "greenscreen-demo.mp4"
+video_file = "greenscreen-asteroid.mp4"
 background_files = [
     "back1.jpg",
     "back2.jpg",
@@ -32,19 +34,24 @@ background_files = [
 background_image = None
 background_id = -1
 
+# Global variables for UI, video control, and processing parameters
 window_name = "Video Preview"
-videoframe = 0
-mousePressed = False
-startX, startY = -1, -1
-minCropX, minCropY = 10, 10
-tolerance_hue, tolerance_sat, tolerance_val = 0, 40, 40
-smooth_mask, erode_level = 16, 2
-cast_range_up, cast_range_down, cast_saturation = 10, 10, 5
-is_transparent, is_play, set_background = False, False, False
-patches = []
-do_show = False
+videoframe = 0  # Current frame index track
+mousePressed = False  # Flag indicating if the mouse is pressed
+startX, startY = -1, -1  # Starting coordinates for region selection
+minCropX, minCropY = 10, 10  # Minimum dimension for a valid crop region
+tolerance_hue, tolerance_sat, tolerance_val = 0, 40, 40  # Color tolerance parameters
+smooth_mask, erode_level = 16, 2  # Parameters for mask processing
+cast_range_up, cast_range_down, cast_saturation = (
+    10,
+    10,
+    5,
+)  # Parameters for hue adjustment
+is_transparent, is_play, set_background = False, False, False  # Display mode flags
+patches = []  # List to store selected hue value patches
+do_show = False  # Flag to update frame display
 
-# Constants for maximum values of the trackbars used for adjusting parameters.
+# Constants for maximum trackbar values (for on-screen parameter adjustments)
 TRACKBAR_TOLERANCE_HUE_MAX = 32
 TRACKBAR_TOLERANCE_SAT_MAX = 255
 TRACKBAR_TOLERANCE_VAL_MAX = 255
@@ -54,6 +61,7 @@ TRACKBAR_CAST_RANGE_UP_MAX = 32
 TRACKBAR_CAST_RANGE_DOWN_MAX = 32
 TRACKBAR_CAST_SATURATION_MAX = 10
 
+# Initialize video capture and retrieve video properties
 cap = cv2.VideoCapture(video_file)
 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -62,10 +70,12 @@ run_delay = 0
 duration_sec = frame_count / fps
 _, frame = cap.read()
 video_height, video_width = frame.shape[:2]
-current_frame = frame.copy()
-frame_image = frame.copy()
+current_frame = frame.copy()  # Holds the current raw video frame
+frame_image = frame.copy()  # Holds the frame to be processed and displayed
 
 
+# Function: resize_image
+# Purpose: Resize and crop a background image to match the video dimensions.
 def resize_image(image_file):
     background_image_raw = cv2.imread(image_file, cv2.IMREAD_COLOR)
     bg_h, bg_w = background_image_raw.shape[:2]
@@ -87,6 +97,8 @@ def resize_image(image_file):
         return resized_bg[start_y : start_y + video_height, :]
 
 
+# Function: get_new_background
+# Purpose: Cycle through the background images.
 def get_new_background():
     global background_id
     background_id += 1
@@ -95,24 +107,27 @@ def get_new_background():
     return resize_image(background_files[background_id])
 
 
+# Function: change_background
+# Purpose: Process the current frame to remove or replace the background based on selected patches.
 def change_background():
     if len(patches) == 0:
+        # If no color patches are selected, return the original frame copy.
         return frame_image.copy()
 
-    # Convert the current frame from BGR to HSV
+    # Convert the current frame from BGR to HSV color space.
     hsv_image = cv2.cvtColor(frame_image, cv2.COLOR_BGR2HSV)
-    # Split channels
+    # Split into individual channels.
     hue_channel, sat_channel, val_channel = cv2.split(hsv_image)
 
-    # Combine all selected hue patches and compute the unique hue values
+    # Aggregate all selected hue values from the user-selected patches.
     hue_values = np.unique(np.concatenate(patches))
-    # Determine the minimum and maximum hue values with user-defined tolerance
+    # Determine the minimum and maximum hue values using the user-defined tolerance.
     min_hue = np.min(hue_values) - tolerance_hue
     max_hue = np.max(hue_values) + tolerance_hue
 
-    # Create an initial mask
+    # Create a base mask (all ones) for the frame.
     mask = np.ones(frame_image.shape[:2], dtype=np.uint8)
-    # Set the mask to 0 (mark for background replacement) for pixels within the specified rule
+    # Mark pixels that fall within the specified hue, saturation, and value ranges.
     mask[
         (hue_channel >= min_hue)
         & (hue_channel <= max_hue)
@@ -120,41 +135,43 @@ def change_background():
         & (val_channel >= tolerance_val)
     ] = 0
 
-    # Apply a Gaussian blur to the mask
+    # Smooth the mask with a Gaussian blur (if enabled).
     if smooth_mask > 0:
-        ksize = smooth_mask * 2 + 1  # Kernel size must be odd
+        ksize = smooth_mask * 2 + 1  # Ensure kernel size is odd.
         mask = cv2.GaussianBlur(mask.astype(np.float32), (ksize, ksize), 0)
-        # Threshold the blurred mask back to binary
+        # Convert blurred mask to binary by thresholding.
         mask = (mask > 0.5).astype(np.uint8)
 
-    # Erode the mask to reduce noise and small artifacts
+    # Erode the mask to remove small noises and artifacts.
     if erode_level > 0:
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.erode(mask, kernel, iterations=erode_level)
 
     hsv_image_d = hsv_image.copy()
-    # Identify greenish areas: extended hue range
+    # Identify "greenish" areas using an extended range for the hue.
     greenish_mask = (
         (mask == 1)
         & (hue_channel >= min_hue - cast_range_down)
         & (hue_channel <= max_hue + cast_range_up)
         & (sat_channel > tolerance_sat * 1.5)
     )
+    # Reset hue values for identified regions.
     hue_channel[greenish_mask] = 0
     hsv_image_d[..., 0] = hue_channel
-    # Adjust the saturation for the pixels in the greenish mask
+    # Adjust saturation levels for the identified regions.
     sat_channel[greenish_mask] = (
         sat_channel[greenish_mask] * cast_saturation / 10
     ).astype(np.uint8)
     hsv_image_d[..., 1] = sat_channel
+    # Convert back to BGR color space.
     result = cv2.cvtColor(hsv_image_d, cv2.COLOR_HSV2BGR)
 
     if set_background:
-        # If replacing the background, apply the new background image to mask 0
+        # When in background replacement mode, substitute the background regions.
         mask_3ch = mask[:, :, np.newaxis]
         result = np.where(mask_3ch == 0, background_image, result)
     else:
-        # Otherwise, create a striped background pattern
+        # Otherwise, fill the background regions with a striped pattern.
         stripe_background = np.zeros_like(result)
         stripe_height = 10
         for y in range(0, stripe_background.shape[0], stripe_height * 2):
@@ -168,28 +185,31 @@ def change_background():
     return result
 
 
+# Function: add_frame_controls
+# Purpose: Overlay UI controls and visual guides on the video frame.
 def add_frame_controls(use_frame):
     y, x, h = use_frame.shape
+    # Create an extended frame to accommodate both video and a side control panel.
     full_frame = np.zeros((y, x + 300, h), dtype=np.uint8)
-    # If transparency mode is enabled, process the frame to change the background
+    # Apply background alteration if transparency mode is active.
     if is_transparent:
         full_frame[0:y, 0:x] = change_background()
     else:
         full_frame[0:y, 0:x] = use_frame
-    # Draw a separator bar between video and control panel
+    # Draw a separator bar between the video display and control panel.
     full_frame[0:y, x + 1 : x + 10] = [255, 0, 255]
 
-    # If there are selected color patches, draw a visual representation of the hue range
+    # If color patches have been selected, visualize the hue range.
     if len(patches) > 0:
-        # Aggregate all hue values from the patches
+        # Aggregate and determine the range of hue values.
         values = np.unique(np.concatenate(patches))
-        # Determine the min and max hue values with additional tolerance for display
         min_value = np.min(values) - tolerance_hue - cast_range_down
         max_value = np.max(values) + tolerance_hue + cast_range_up
         num_values = max_value - min_value + 1
         color_height = y // int(num_values)
         for i in range(num_values):
             hue = i + min_value
+            # Draw multiple rectangles for each hue to represent different saturation/value states.
             for opt in range(4):
                 if opt == 0:
                     hsv_color = np.uint8([[[hue, 255, 255]]])
@@ -199,6 +219,7 @@ def add_frame_controls(use_frame):
                     hsv_color = np.uint8([[[hue, 255, tolerance_val]]])
                 else:
                     hsv_color = np.uint8([[[hue, tolerance_sat, tolerance_val]]])
+                # Adjust visualization dimensions based on the hue position.
                 if i < cast_range_down or i > num_values - cast_range_up:
                     val_width = 50
                     val_offset = 22
@@ -211,6 +232,7 @@ def add_frame_controls(use_frame):
                 else:
                     val_width = 72
                     val_offset = 0
+                # Convert the HSV color to BGR for display.
                 bgr_color = cv2.cvtColor(hsv_color, cv2.COLOR_HSV2BGR)[0][0].tolist()
                 cv2.rectangle(
                     full_frame,
@@ -222,6 +244,7 @@ def add_frame_controls(use_frame):
                     bgr_color,
                     -1,
                 )
+                # If space allows, render the hue value as text.
                 if color_height > 25 and opt == 0:
                     cv2.putText(
                         full_frame,
@@ -234,6 +257,8 @@ def add_frame_controls(use_frame):
     return full_frame
 
 
+# Function: show_frame
+# Purpose: Render the processed frame along with UI overlays and update timing.
 def show_frame():
     global run_delay
     start = time.perf_counter()
@@ -243,6 +268,8 @@ def show_frame():
     run_delay = max(0, int((end - start) * 1000))
 
 
+# Function: change_frame
+# Purpose: Update the video frame based on user's trackbar input.
 def change_frame(*args):
     global videoframe, do_show
     videoframe = args[0]
@@ -254,6 +281,8 @@ def change_frame(*args):
         frame_image[:] = this_frame
 
 
+# Function: trackbar_callback
+# Purpose: General callback generator for trackbar events to update global variables.
 def trackbar_callback(var_name):
     def callback(value):
         globals()[var_name] = value
@@ -263,6 +292,8 @@ def trackbar_callback(var_name):
     return callback
 
 
+# Function: get_colors
+# Purpose: Extract unique hue values from the selected region and update color patches.
 def get_colors(cropped_image):
     global patches, do_show
     hsv_crop = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2HSV)
@@ -272,16 +303,21 @@ def get_colors(cropped_image):
     do_show = True
 
 
+# Function: mouse_callback
+# Purpose: Handle mouse events to allow region selection on the video frame.
 def mouse_callback(action, x, y, flags, userdata):
     global mousePressed, do_show, startX, startY
+    # Constrain mouse coordinates to be within the video frame dimensions.
     x = video_width if x > video_width else x
     x = 0 if x < 0 else x
     y = video_height if y > video_height else y
     y = 0 if y < 0 else y
     if action == cv2.EVENT_LBUTTONDOWN:
+        # Begin region selection.
         mousePressed, startX, startY = True, x, y
         frame_image[:] = current_frame
     elif action == cv2.EVENT_MOUSEMOVE:
+        # Update the rectangle as the mouse moves.
         if mousePressed:
             temp_image = current_frame.copy()
             cv2.rectangle(temp_image, (startX, startY), (x, y), (255, 0, 255), 1)
@@ -289,12 +325,13 @@ def mouse_callback(action, x, y, flags, userdata):
         else:
             return
     elif action == cv2.EVENT_LBUTTONUP:
+        # Finalize and process the selected region.
         mousePressed = False
         minX = min(startX, x)
         minY = min(startY, y)
         maxX = max(startX, x)
         maxY = max(startY, y)
-        if maxX - minX >= minCropX and maxY - minY >= minCropY:
+        if maxX - minX >= minCropX and maxY - minCropY >= minCropY:
             cropped_image = current_frame[minY:maxY, minX:maxX]
             get_colors(cropped_image)
             frame_image[:] = current_frame
@@ -303,6 +340,7 @@ def mouse_callback(action, x, y, flags, userdata):
     do_show = True
 
 
+# Set up the main window, trackbars, and mouse callback.
 cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 cv2.createTrackbar("Video position", window_name, videoframe, frame_count, change_frame)
 cv2.createTrackbar(
@@ -363,14 +401,17 @@ cv2.createTrackbar(
 )
 cv2.setMouseCallback(window_name, mouse_callback)
 
+# Main loop: process video frames and handle user input.
 update_counter = 0
 while True:
     set_wait_time = interval
     if is_play:
+        # When playback is enabled, adjust timing for smooth video update.
         set_wait_time = -run_delay
         while set_wait_time < interval // 2:
             ret, frame = cap.read()
             if not ret:
+                # Restart video if end is reached.
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = cap.read()
             set_wait_time += interval
@@ -380,27 +421,34 @@ while True:
         do_show = True
     k = cv2.waitKey(set_wait_time)
     if k == ord("u") and len(patches) > 0:
+        # Undo the last region selection.
         patches.pop()
         do_show = True
     elif k == ord("t") and len(patches) > 0:
+        # Toggle background transparency/removal mode.
         is_transparent = not is_transparent
         do_show = True
     elif k == ord("b"):
+        # Toggle between removing and replacing the background.
         if not set_background:
             background_image = get_new_background()
         set_background = not set_background
         do_show = True
     elif k == 32:
+        # Toggle video playback.
         is_play = not is_play
     elif k == 27 or k == ord("q"):
+        # Exit the application.
         break
     if do_show:
         show_frame()
         if update_counter >= fps:
+            # Update the video position trackbar periodically.
             current_pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
             cv2.setTrackbarPos("Video position", window_name, current_pos)
             update_counter = 0
         do_show = False
 
+# Cleanup: release video capture and close all windows.
 cap.release()
 cv2.destroyAllWindows()
